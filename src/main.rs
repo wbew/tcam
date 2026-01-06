@@ -1,3 +1,4 @@
+use clap::Parser;
 use image::{ImageBuffer, Rgb};
 use nokhwa::{
     Camera,
@@ -5,7 +6,13 @@ use nokhwa::{
     utils::{CameraIndex, RequestedFormat, RequestedFormatType},
 };
 
+#[derive(Parser)]
+#[command(name = "tcam", version = "1.0.0", about = "terminal camera")]
+struct Cli {}
+
 fn main() {
+    let _ = Cli::parse();
+
     let mut camera = Camera::new(
         // Which camera to use
         CameraIndex::default(),
