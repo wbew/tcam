@@ -1,9 +1,20 @@
+use std::io;
+
 use clap::Parser;
+use crossterm::{
+    ExecutableCommand,
+    event::{self, Event, KeyCode, KeyEventKind},
+};
 use image::{ImageBuffer, Rgb};
 use nokhwa::{
     Camera,
     pixel_format::RgbFormat,
     utils::{CameraIndex, RequestedFormat, RequestedFormatType},
+};
+use ratatui::{
+    layout::Alignment,
+    prelude::CrosstermBackend,
+    widgets::{Block, Borders, Paragraph},
 };
 
 #[derive(Parser)]
@@ -12,7 +23,27 @@ struct Cli {}
 
 fn main() {
     let _ = Cli::parse();
+    crossterm::terminal::enable_raw_mode().expect("Can't enable raw mode");
+    std::io::stdout()
+        .execute(crossterm::terminal::EnterAlternateScreen)
+        .expect("Can't enter alternate screen");
 
+    let mut terminal = ratatui::Terminal::new(CrosstermBackend::new(std::io::stdout()))
+        .expect("Can't create terminal");
+    let result = run(&mut terminal);
+
+    crossterm::terminal::disable_raw_mode().expect("Can't disable raw mode");
+    std::io::stdout()
+        .execute(crossterm::terminal::LeaveAlternateScreen)
+        .expect("Can't leave alternate screen");
+
+    if let Err(e) = result {
+        eprintln!("Error: {}", e);
+    }
+    std::process::exit(0);
+}
+
+fn take_photo() -> Result<(), io::Error> {
     let mut camera = Camera::new(
         // Which camera to use
         CameraIndex::default(),
@@ -37,5 +68,54 @@ fn main() {
         ImageBuffer::from_raw(width, height, raw).expect("Failed to create image buffer");
 
     img.save("capture.png").expect("Failed to save");
-    println!("Saved to capture.png");
+
+    Ok(())
+}
+
+fn run(terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    let mut status = "[SPACE] Take Photo [Q] Quit";
+
+    loop {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let block = Block::default()
+                .title(" 📷 tcam ")
+                .borders(Borders::ALL)
+                .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
+
+            let text = Paragraph::new(status)
+                .block(block)
+                .alignment(ratatui::layout::Alignment::Center);
+
+            frame.render_widget(text, area);
+        })?;
+
+        // Poll for input (Crossterm)
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => {
+                            return Ok(());
+                        }
+                        KeyCode::Char(' ') => {
+                            status = "📸 Capturing...";
+                            terminal.draw(|f| {
+                                let p = Paragraph::new(status)
+                                    .block(Block::default().borders(Borders::ALL))
+                                    .alignment(Alignment::Center);
+                                f.render_widget(p, f.area());
+                            })?;
+
+                            match take_photo() {
+                                Ok(_) => status = "✅ Saved to capture.png!",
+                                Err(_) => status = "❌ Capture failed!",
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }
