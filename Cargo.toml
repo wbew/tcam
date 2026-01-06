@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+image = { version = "0.24", features = ["jpeg"] }
+# image = { version = "0.24", default-features = false, features = [
+#   "png",
+#   "jpeg",
+# ] }
 nokhwa = { version = "0.10", features = ["input-avfoundation"] }
