@@ -25,8 +25,7 @@ struct Cli {}
 fn main() {
     let _ = Cli::parse();
 
-    let picker = Picker::from_query_stdio()
-        .expect("Can't render images in your terminal, so I'm outta here");
+    let picker = Picker::halfblocks();
     crossterm::terminal::enable_raw_mode().expect("Can't enable raw mode");
     std::io::stdout()
         .execute(crossterm::terminal::EnterAlternateScreen)
