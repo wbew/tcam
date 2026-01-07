@@ -12,10 +12,11 @@ use nokhwa::{
     utils::{CameraIndex, RequestedFormat, RequestedFormatType},
 };
 use ratatui::{
-    layout::Alignment,
+    layout::{Alignment, Constraint, Direction, Layout},
     prelude::CrosstermBackend,
     widgets::{Block, Borders, Paragraph},
 };
+use ratatui_image::{StatefulImage, picker::Picker};
 
 #[derive(Parser)]
 #[command(name = "tcam", version = "1.0.0", about = "terminal camera")]
@@ -23,6 +24,9 @@ struct Cli {}
 
 fn main() {
     let _ = Cli::parse();
+
+    let picker = Picker::from_query_stdio()
+        .expect("Can't render images in your terminal, so I'm outta here");
     crossterm::terminal::enable_raw_mode().expect("Can't enable raw mode");
     std::io::stdout()
         .execute(crossterm::terminal::EnterAlternateScreen)
@@ -30,7 +34,14 @@ fn main() {
 
     let mut terminal = ratatui::Terminal::new(CrosstermBackend::new(std::io::stdout()))
         .expect("Can't create terminal");
-    let result = run(&mut terminal);
+    let mut camera = Camera::new(
+        CameraIndex::default(),
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
+    )
+    .expect("No camera?");
+    camera.open_stream().expect("Failed to use camera");
+
+    let result = run(&mut terminal, &mut camera, &picker);
 
     crossterm::terminal::disable_raw_mode().expect("Can't disable raw mode");
     std::io::stdout()
@@ -43,16 +54,7 @@ fn main() {
     std::process::exit(0);
 }
 
-fn take_photo() -> Result<(), io::Error> {
-    let mut camera = Camera::new(
-        // Which camera to use
-        CameraIndex::default(),
-        // A format for the camera output (e.g. 1024x1024, MP4)
-        RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
-    )
-    .expect("No camera?");
-    camera.open_stream().expect("Failed to use camera");
-
+fn take_photo(camera: &mut Camera) -> Result<(), io::Error> {
     // Warm up - discard first ~30 frames for auto-exposure
     for _ in 0..30 {
         let _ = camera.frame();
@@ -60,24 +62,41 @@ fn take_photo() -> Result<(), io::Error> {
 
     let frame = camera.frame().expect("Failed to take a frame");
     let decoded = frame.decode_image::<RgbFormat>().expect("Failed to decode");
-
-    // Convert to our image crate version
-    let (width, height) = (decoded.width(), decoded.height());
-    let raw: Vec<u8> = decoded.into_raw();
-    let img: ImageBuffer<Rgb<u8>, _> =
-        ImageBuffer::from_raw(width, height, raw).expect("Failed to create image buffer");
-
-    img.save("capture.png").expect("Failed to save");
+    decoded
+        .save(&format!(
+            "capture-{}.png",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ))
+        .expect("Failed to save");
 
     Ok(())
 }
 
-fn run(terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+fn run(
+    terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
+    camera: &mut Camera,
+    picker: &Picker,
+) -> io::Result<()> {
     let mut status = "[SPACE] Take Photo [Q] Quit";
 
     loop {
+        let frame = camera.frame().expect("Failed to get frame");
+        let decoded = frame.decode_image::<RgbFormat>().expect("Failed to decode");
+        let img = image::DynamicImage::ImageRgb8(decoded);
+        let mut terminal_img_state = picker.new_resize_protocol(img);
+
         terminal.draw(|frame| {
-            let area = frame.area();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+                .split(frame.area());
+
+            frame.render_stateful_widget(StatefulImage::new(), chunks[0], &mut terminal_img_state);
+
+            // let area = frame.area();
             let block = Block::default()
                 .title(" 📷 tcam ")
                 .borders(Borders::ALL)
@@ -87,7 +106,7 @@ fn run(terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>) -> io::Re
                 .block(block)
                 .alignment(ratatui::layout::Alignment::Center);
 
-            frame.render_widget(text, area);
+            frame.render_widget(text, chunks[1]);
         })?;
 
         // Poll for input (Crossterm)
@@ -107,7 +126,7 @@ fn run(terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>) -> io::Re
                                 f.render_widget(p, f.area());
                             })?;
 
-                            match take_photo() {
+                            match take_photo(camera) {
                                 Ok(_) => status = "✅ Saved to capture.png!",
                                 Err(_) => status = "❌ Capture failed!",
                             }
