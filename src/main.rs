@@ -131,8 +131,7 @@ fn render(
     frame: &mut Frame,
     image_state: &mut StatefulProtocol,
     status: &str,
-    captured_photos: &[image::DynamicImage],
-    picker: &Picker,
+    captured_photos: &[(image::DynamicImage, PhotoStyle)],
     current_style: PhotoStyle,
 ) {
     // Main vertical split: camera (fill) | bottom bar (fixed)
@@ -182,8 +181,9 @@ fn render(
     // Render photos horizontally
     for (i, chunk) in photo_chunks.iter().enumerate() {
         if i < captured_photos.len() {
-            let photo = &captured_photos[i];
-            let mut photo_state = picker.new_resize_protocol(photo.clone());
+            let (photo, style) = &captured_photos[i];
+            let photo_picker: Picker = (*style).into();
+            let mut photo_state = photo_picker.new_resize_protocol(photo.clone());
             frame.render_stateful_widget(StatefulImage::new(), *chunk, &mut photo_state);
         } else {
             // Empty placeholder
@@ -201,7 +201,7 @@ fn run(
 ) -> io::Result<()> {
     let mut status = "";
     let mut status_set_at: Option<Instant> = None;
-    let mut captured_photos: Vec<image::DynamicImage> = Vec::with_capacity(4);
+    let mut captured_photos: Vec<(image::DynamicImage, PhotoStyle)> = Vec::with_capacity(4);
     let mut current_style = PhotoStyle::default();
     let mut picker: Picker = current_style.into();
 
@@ -219,16 +219,7 @@ fn run(
         let img = image::DynamicImage::ImageRgb8(decoded);
         let mut img_state = picker.new_resize_protocol(img);
 
-        terminal.draw(|f| {
-            render(
-                f,
-                &mut img_state,
-                status,
-                &captured_photos,
-                &picker,
-                current_style,
-            )
-        })?;
+        terminal.draw(|f| render(f, &mut img_state, status, &captured_photos, current_style))?;
 
         // Poll for input
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -246,14 +237,7 @@ fn run(
                             // Show "Capturing..." before blocking
                             status = "📸 Capturing...";
                             terminal.draw(|f| {
-                                render(
-                                    f,
-                                    &mut img_state,
-                                    status,
-                                    &captured_photos,
-                                    &picker,
-                                    current_style,
-                                )
+                                render(f, &mut img_state, status, &captured_photos, current_style)
                             })?;
 
                             match take_photo(camera, current_style) {
@@ -262,7 +246,7 @@ fn run(
                                     if captured_photos.len() >= 4 {
                                         captured_photos.remove(0);
                                     }
-                                    captured_photos.push(img);
+                                    captured_photos.push((img, current_style));
                                     status = "✅ Saved!";
                                 }
                                 Err(_) => status = "❌ Capture failed!",
