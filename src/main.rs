@@ -81,8 +81,7 @@ fn render(
     frame: &mut Frame,
     image_state: &mut StatefulProtocol,
     status: &str,
-    captured_photos: &[image::DynamicImage],
-    picker: &Picker,
+    photo_states: &mut [StatefulProtocol],
 ) {
     // Main vertical split: camera (fill) | bottom bar (fixed)
     let main_chunks = Layout::default()
@@ -127,10 +126,8 @@ fn render(
 
     // Render photos horizontally
     for (i, chunk) in photo_chunks.iter().enumerate() {
-        if i < captured_photos.len() {
-            let photo = &captured_photos[i];
-            let mut photo_state = picker.new_resize_protocol(photo.clone());
-            frame.render_stateful_widget(StatefulImage::new(), *chunk, &mut photo_state);
+        if i < photo_states.len() {
+            frame.render_stateful_widget(StatefulImage::new(), *chunk, &mut photo_states[i]);
         } else {
             // Empty placeholder
             let placeholder = Block::default()
@@ -148,7 +145,7 @@ fn run(
 ) -> io::Result<()> {
     let mut status = "";
     let mut status_set_at: Option<Instant> = None;
-    let mut captured_photos: Vec<image::DynamicImage> = Vec::with_capacity(4);
+    let mut photo_states: Vec<StatefulProtocol> = Vec::with_capacity(4);
 
     loop {
         // Clear status after timeout
@@ -162,12 +159,12 @@ fn run(
         let frame = camera.frame().expect("Failed to get frame");
         let decoded = frame.decode_image::<RgbFormat>().expect("Failed to decode");
         let img = image::DynamicImage::ImageRgb8(decoded);
-        let mut img_state = picker.new_resize_protocol(img);
+        let mut img_state = picker.new_resize_protocol(img.clone());
 
-        terminal.draw(|f| render(f, &mut img_state, status, &captured_photos, picker))?;
+        terminal.draw(|f| render(f, &mut img_state, status, &mut photo_states))?;
 
-        // Poll for input
-        if event::poll(std::time::Duration::from_millis(100))? {
+        // Poll for input (short timeout since camera.frame() already paces us)
+        if event::poll(std::time::Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
@@ -178,16 +175,17 @@ fn run(
                             // Show "Capturing..." before blocking
                             status = "📸 Capturing...";
                             terminal.draw(|f| {
-                                render(f, &mut img_state, status, &captured_photos, picker)
+                                render(f, &mut img_state, status, &mut photo_states)
                             })?;
 
                             match take_photo(camera) {
                                 Ok(img) => {
                                     // Keep only the last 4 photos
-                                    if captured_photos.len() >= 4 {
-                                        captured_photos.remove(0);
+                                    if photo_states.len() >= 4 {
+                                        photo_states.remove(0);
                                     }
-                                    captured_photos.push(img);
+                                    // Create thumbnail state once and cache it
+                                    photo_states.push(picker.new_resize_protocol(img));
                                     status = "✅ Saved!";
                                 }
                                 Err(_) => status = "❌ Capture failed!",
