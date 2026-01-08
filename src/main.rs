@@ -1,22 +1,25 @@
 use std::io;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use crossterm::{
     ExecutableCommand,
     event::{self, Event, KeyCode, KeyEventKind},
 };
-use image::{ImageBuffer, Rgb};
+use image;
 use nokhwa::{
     Camera,
     pixel_format::RgbFormat,
     utils::{CameraIndex, RequestedFormat, RequestedFormatType},
 };
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout},
+    Frame,
+    layout::{Constraint, Direction, Layout},
     prelude::CrosstermBackend,
+    text::{Line, Text},
     widgets::{Block, Borders, Paragraph},
 };
-use ratatui_image::{StatefulImage, picker::Picker};
+use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
 
 #[derive(Parser)]
 #[command(name = "tcam", version = "1.0.0", about = "terminal camera")]
@@ -74,41 +77,54 @@ fn take_photo(camera: &mut Camera) -> Result<(), io::Error> {
     Ok(())
 }
 
+fn render(frame: &mut Frame, image_state: &mut StatefulProtocol, status: &str) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+        .split(frame.area());
+
+    frame.render_stateful_widget(StatefulImage::new(), chunks[0], image_state);
+
+    let block = Block::default()
+        .title(" 📷 tcam ")
+        .borders(Borders::ALL)
+        .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
+
+    let text = Paragraph::new(Text::from(vec![
+        Line::from(status),
+        Line::from("[SPACE] Take Photo  [Q] Quit"),
+    ]))
+    .block(block)
+    .alignment(ratatui::layout::Alignment::Center);
+
+    frame.render_widget(text, chunks[1]);
+}
+
 fn run(
     terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     camera: &mut Camera,
     picker: &Picker,
 ) -> io::Result<()> {
-    let mut status = "[SPACE] Take Photo [Q] Quit";
+    let mut status = "";
+    let mut status_set_at: Option<Instant> = None;
 
     loop {
+        // Clear status after timeout
+        if let Some(t) = status_set_at {
+            if t.elapsed() > Duration::from_secs(3) {
+                status = "";
+                status_set_at = None;
+            }
+        }
+
         let frame = camera.frame().expect("Failed to get frame");
         let decoded = frame.decode_image::<RgbFormat>().expect("Failed to decode");
         let img = image::DynamicImage::ImageRgb8(decoded);
-        let mut terminal_img_state = picker.new_resize_protocol(img);
+        let mut img_state = picker.new_resize_protocol(img);
 
-        terminal.draw(|frame| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
-                .split(frame.area());
+        terminal.draw(|f| render(f, &mut img_state, status))?;
 
-            frame.render_stateful_widget(StatefulImage::new(), chunks[0], &mut terminal_img_state);
-
-            // let area = frame.area();
-            let block = Block::default()
-                .title(" 📷 tcam ")
-                .borders(Borders::ALL)
-                .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
-
-            let text = Paragraph::new(status)
-                .block(block)
-                .alignment(ratatui::layout::Alignment::Center);
-
-            frame.render_widget(text, chunks[1]);
-        })?;
-
-        // Poll for input (Crossterm)
+        // Poll for input
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -117,18 +133,15 @@ fn run(
                             return Ok(());
                         }
                         KeyCode::Char(' ') => {
+                            // Show "Capturing..." before blocking
                             status = "📸 Capturing...";
-                            terminal.draw(|f| {
-                                let p = Paragraph::new(status)
-                                    .block(Block::default().borders(Borders::ALL))
-                                    .alignment(Alignment::Center);
-                                f.render_widget(p, f.area());
-                            })?;
+                            terminal.draw(|f| render(f, &mut img_state, status))?;
 
                             match take_photo(camera) {
-                                Ok(_) => status = "✅ Saved to capture.png!",
+                                Ok(_) => status = "✅ Saved!",
                                 Err(_) => status = "❌ Capture failed!",
                             }
+                            status_set_at = Some(Instant::now());
                         }
                         _ => {}
                     }
