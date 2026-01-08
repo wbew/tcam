@@ -113,22 +113,54 @@ fn take_photo(camera: &mut Camera, style: PhotoStyle) -> Result<image::DynamicIm
         _ => image::DynamicImage::ImageRgb8(decoded),
     };
 
-    final_img
-        .save(&format!(
-            "capture-{}-{}.png",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            style.name()
-        ))
-        .expect("Failed to save");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    match style {
+        PhotoStyle::Ascii => {
+            let ascii = image_to_ascii(&final_img, 120, 40);
+            std::fs::write(format!("capture-{}-ascii.txt", timestamp), ascii)
+                .expect("Failed to save");
+        }
+        _ => {
+            final_img
+                .save(&format!("capture-{}-{}.png", timestamp, style.name()))
+                .expect("Failed to save");
+        }
+    }
 
     Ok(final_img)
 }
 
+fn image_to_ascii(img: &image::DynamicImage, width: u16, height: u16) -> String {
+    const ASCII_CHARS: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
+
+    let resized = img.resize_exact(
+        width as u32,
+        height as u32,
+        image::imageops::FilterType::Nearest,
+    );
+    let gray = resized.to_luma8();
+
+    let mut result = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = gray.get_pixel(x as u32, y as u32).0[0];
+            let idx = (pixel as usize * (ASCII_CHARS.len() - 1)) / 255;
+            result.push(ASCII_CHARS[idx]);
+        }
+        if y < height - 1 {
+            result.push('\n');
+        }
+    }
+    result
+}
+
 fn render(
     frame: &mut Frame,
+    img: &image::DynamicImage,
     image_state: &mut StatefulProtocol,
     status: &str,
     captured_photos: &[(image::DynamicImage, PhotoStyle)],
@@ -141,7 +173,16 @@ fn render(
         .split(frame.area());
 
     // Render camera preview
-    frame.render_stateful_widget(StatefulImage::new(), main_chunks[0], image_state);
+    match current_style {
+        PhotoStyle::Ascii => {
+            let ascii = image_to_ascii(img, main_chunks[0].width, main_chunks[0].height);
+            let paragraph = Paragraph::new(ascii);
+            frame.render_widget(paragraph, main_chunks[0]);
+        }
+        _ => {
+            frame.render_stateful_widget(StatefulImage::new(), main_chunks[0], image_state);
+        }
+    }
 
     // Bottom bar split: status row (3 lines) | photo row (remaining)
     let bottom_chunks = Layout::default()
@@ -182,9 +223,18 @@ fn render(
     for (i, chunk) in photo_chunks.iter().enumerate() {
         if i < captured_photos.len() {
             let (photo, style) = &captured_photos[i];
-            let photo_picker: Picker = (*style).into();
-            let mut photo_state = photo_picker.new_resize_protocol(photo.clone());
-            frame.render_stateful_widget(StatefulImage::new(), *chunk, &mut photo_state);
+            match style {
+                PhotoStyle::Ascii => {
+                    let ascii = image_to_ascii(photo, chunk.width, chunk.height);
+                    let paragraph = Paragraph::new(ascii);
+                    frame.render_widget(paragraph, *chunk);
+                }
+                _ => {
+                    let photo_picker: Picker = (*style).into();
+                    let mut photo_state = photo_picker.new_resize_protocol(photo.clone());
+                    frame.render_stateful_widget(StatefulImage::new(), *chunk, &mut photo_state);
+                }
+            }
         } else {
             // Empty placeholder
             let placeholder = Block::default()
@@ -217,9 +267,18 @@ fn run(
         let frame = camera.frame().expect("Failed to get frame");
         let decoded = frame.decode_image::<RgbFormat>().expect("Failed to decode");
         let img = image::DynamicImage::ImageRgb8(decoded);
-        let mut img_state = picker.new_resize_protocol(img);
+        let mut img_state = picker.new_resize_protocol(img.clone());
 
-        terminal.draw(|f| render(f, &mut img_state, status, &captured_photos, current_style))?;
+        terminal.draw(|f| {
+            render(
+                f,
+                &img,
+                &mut img_state,
+                status,
+                &captured_photos,
+                current_style,
+            )
+        })?;
 
         // Poll for input
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -237,7 +296,14 @@ fn run(
                             // Show "Capturing..." before blocking
                             status = "📸 Capturing...";
                             terminal.draw(|f| {
-                                render(f, &mut img_state, status, &captured_photos, current_style)
+                                render(
+                                    f,
+                                    &img,
+                                    &mut img_state,
+                                    status,
+                                    &captured_photos,
+                                    current_style,
+                                )
                             })?;
 
                             match take_photo(camera, current_style) {
