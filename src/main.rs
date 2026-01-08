@@ -56,7 +56,7 @@ fn main() {
     std::process::exit(0);
 }
 
-fn take_photo(camera: &mut Camera) -> Result<(), io::Error> {
+fn take_photo(camera: &mut Camera) -> Result<image::DynamicImage, io::Error> {
     // Warm up - discard first ~30 frames for auto-exposure
     for _ in 0..30 {
         let _ = camera.frame();
@@ -74,17 +74,32 @@ fn take_photo(camera: &mut Camera) -> Result<(), io::Error> {
         ))
         .expect("Failed to save");
 
-    Ok(())
+    Ok(image::DynamicImage::ImageRgb8(decoded))
 }
 
-fn render(frame: &mut Frame, image_state: &mut StatefulProtocol, status: &str) {
-    let chunks = Layout::default()
+fn render(
+    frame: &mut Frame,
+    image_state: &mut StatefulProtocol,
+    status: &str,
+    captured_photos: &[image::DynamicImage],
+    picker: &Picker,
+) {
+    // Main vertical split: camera (fill) | bottom bar (fixed)
+    let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+        .constraints([Constraint::Min(20), Constraint::Length(15)])
         .split(frame.area());
 
-    frame.render_stateful_widget(StatefulImage::new(), chunks[0], image_state);
+    // Render camera preview
+    frame.render_stateful_widget(StatefulImage::new(), main_chunks[0], image_state);
 
+    // Bottom bar split: status row (3 lines) | photo row (remaining)
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Fill(1)])
+        .split(main_chunks[1]);
+
+    // Status bar
     let block = Block::default()
         .title(" 📷 tcam ")
         .borders(Borders::ALL)
@@ -97,7 +112,33 @@ fn render(frame: &mut Frame, image_state: &mut StatefulProtocol, status: &str) {
     .block(block)
     .alignment(ratatui::layout::Alignment::Center);
 
-    frame.render_widget(text, chunks[1]);
+    frame.render_widget(text, bottom_chunks[0]);
+
+    // Photo slots: 4 equal horizontal sections
+    let photo_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+        ])
+        .split(bottom_chunks[1]);
+
+    // Render photos horizontally
+    for (i, chunk) in photo_chunks.iter().enumerate() {
+        if i < captured_photos.len() {
+            let photo = &captured_photos[i];
+            let mut photo_state = picker.new_resize_protocol(photo.clone());
+            frame.render_stateful_widget(StatefulImage::new(), *chunk, &mut photo_state);
+        } else {
+            // Empty placeholder
+            let placeholder = Block::default()
+                .borders(Borders::ALL)
+                .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray));
+            frame.render_widget(placeholder, *chunk);
+        }
+    }
 }
 
 fn run(
@@ -107,11 +148,12 @@ fn run(
 ) -> io::Result<()> {
     let mut status = "";
     let mut status_set_at: Option<Instant> = None;
+    let mut captured_photos: Vec<image::DynamicImage> = Vec::with_capacity(4);
 
     loop {
         // Clear status after timeout
         if let Some(t) = status_set_at {
-            if t.elapsed() > Duration::from_secs(3) {
+            if t.elapsed() > Duration::from_secs(2) {
                 status = "";
                 status_set_at = None;
             }
@@ -122,7 +164,7 @@ fn run(
         let img = image::DynamicImage::ImageRgb8(decoded);
         let mut img_state = picker.new_resize_protocol(img);
 
-        terminal.draw(|f| render(f, &mut img_state, status))?;
+        terminal.draw(|f| render(f, &mut img_state, status, &captured_photos, picker))?;
 
         // Poll for input
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -135,10 +177,19 @@ fn run(
                         KeyCode::Char(' ') => {
                             // Show "Capturing..." before blocking
                             status = "📸 Capturing...";
-                            terminal.draw(|f| render(f, &mut img_state, status))?;
+                            terminal.draw(|f| {
+                                render(f, &mut img_state, status, &captured_photos, picker)
+                            })?;
 
                             match take_photo(camera) {
-                                Ok(_) => status = "✅ Saved!",
+                                Ok(img) => {
+                                    // Keep only the last 4 photos
+                                    if captured_photos.len() >= 4 {
+                                        captured_photos.remove(0);
+                                    }
+                                    captured_photos.push(img);
+                                    status = "✅ Saved!";
+                                }
                                 Err(_) => status = "❌ Capture failed!",
                             }
                             status_set_at = Some(Instant::now());
