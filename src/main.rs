@@ -59,15 +59,15 @@ fn main() {
 enum PhotoStyle {
     #[default]
     Real,
-    Halfblocks,
+    Pixel,
     Ascii,
 }
 
 impl PhotoStyle {
     fn next(self) -> Self {
         match self {
-            PhotoStyle::Real => PhotoStyle::Halfblocks,
-            PhotoStyle::Halfblocks => PhotoStyle::Ascii,
+            PhotoStyle::Real => PhotoStyle::Pixel,
+            PhotoStyle::Pixel => PhotoStyle::Ascii,
             PhotoStyle::Ascii => PhotoStyle::Real,
         }
     }
@@ -75,7 +75,7 @@ impl PhotoStyle {
     fn name(self) -> &'static str {
         match self {
             PhotoStyle::Real => "real",
-            PhotoStyle::Halfblocks => "halfblocks",
+            PhotoStyle::Pixel => "pixel",
             PhotoStyle::Ascii => "ascii",
         }
     }
@@ -85,7 +85,7 @@ impl From<PhotoStyle> for Picker {
     fn from(style: PhotoStyle) -> Self {
         match style {
             PhotoStyle::Real => Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
-            PhotoStyle::Halfblocks => Picker::halfblocks(),
+            PhotoStyle::Pixel => Picker::halfblocks(),
             PhotoStyle::Ascii => Picker::halfblocks(), // fallback to halfblocks for now
         }
     }
@@ -99,7 +99,21 @@ fn take_photo(camera: &mut Camera, style: PhotoStyle) -> Result<image::DynamicIm
 
     let frame = camera.frame().expect("Failed to take a frame");
     let decoded = frame.decode_image::<RgbFormat>().expect("Failed to decode");
-    decoded
+
+    let final_img = match style {
+        PhotoStyle::Pixel => {
+            // Downsample to 80x60, then upscale to 1280x960 with nearest-neighbor
+            let small = image::DynamicImage::ImageRgb8(decoded).resize_exact(
+                80,
+                60,
+                image::imageops::FilterType::Nearest,
+            );
+            small.resize_exact(1280, 960, image::imageops::FilterType::Nearest)
+        }
+        _ => image::DynamicImage::ImageRgb8(decoded),
+    };
+
+    final_img
         .save(&format!(
             "capture-{}-{}.png",
             std::time::SystemTime::now()
@@ -110,7 +124,7 @@ fn take_photo(camera: &mut Camera, style: PhotoStyle) -> Result<image::DynamicIm
         ))
         .expect("Failed to save");
 
-    Ok(image::DynamicImage::ImageRgb8(decoded))
+    Ok(final_img)
 }
 
 fn render(
@@ -144,7 +158,10 @@ fn render(
 
     let text = Paragraph::new(Text::from(vec![
         Line::from(status),
-        Line::from(format!("[SPACE] Take Photo  [S] Style: {}  [Q] Quit", current_style.name())),
+        Line::from(format!(
+            "[SPACE] Take Photo  [S] Style: {}  [Q] Quit",
+            current_style.name()
+        )),
     ]))
     .block(block)
     .alignment(ratatui::layout::Alignment::Center);
@@ -202,7 +219,16 @@ fn run(
         let img = image::DynamicImage::ImageRgb8(decoded);
         let mut img_state = picker.new_resize_protocol(img);
 
-        terminal.draw(|f| render(f, &mut img_state, status, &captured_photos, &picker, current_style))?;
+        terminal.draw(|f| {
+            render(
+                f,
+                &mut img_state,
+                status,
+                &captured_photos,
+                &picker,
+                current_style,
+            )
+        })?;
 
         // Poll for input
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -220,7 +246,14 @@ fn run(
                             // Show "Capturing..." before blocking
                             status = "📸 Capturing...";
                             terminal.draw(|f| {
-                                render(f, &mut img_state, status, &captured_photos, &picker, current_style)
+                                render(
+                                    f,
+                                    &mut img_state,
+                                    status,
+                                    &captured_photos,
+                                    &picker,
+                                    current_style,
+                                )
                             })?;
 
                             match take_photo(camera, current_style) {
