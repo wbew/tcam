@@ -28,7 +28,6 @@ struct Cli {}
 fn main() {
     let _ = Cli::parse();
 
-    let picker = Picker::halfblocks();
     crossterm::terminal::enable_raw_mode().expect("Can't enable raw mode");
     std::io::stdout()
         .execute(crossterm::terminal::EnterAlternateScreen)
@@ -43,7 +42,7 @@ fn main() {
     .expect("No camera?");
     camera.open_stream().expect("Failed to use camera");
 
-    let result = run(&mut terminal, &mut camera, &picker);
+    let result = run(&mut terminal, &mut camera);
 
     crossterm::terminal::disable_raw_mode().expect("Can't disable raw mode");
     std::io::stdout()
@@ -56,7 +55,43 @@ fn main() {
     std::process::exit(0);
 }
 
-fn take_photo(camera: &mut Camera) -> Result<image::DynamicImage, io::Error> {
+#[derive(Clone, Copy, Default)]
+enum PhotoStyle {
+    #[default]
+    Real,
+    Halfblocks,
+    Ascii,
+}
+
+impl PhotoStyle {
+    fn next(self) -> Self {
+        match self {
+            PhotoStyle::Real => PhotoStyle::Halfblocks,
+            PhotoStyle::Halfblocks => PhotoStyle::Ascii,
+            PhotoStyle::Ascii => PhotoStyle::Real,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            PhotoStyle::Real => "real",
+            PhotoStyle::Halfblocks => "halfblocks",
+            PhotoStyle::Ascii => "ascii",
+        }
+    }
+}
+
+impl From<PhotoStyle> for Picker {
+    fn from(style: PhotoStyle) -> Self {
+        match style {
+            PhotoStyle::Real => Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
+            PhotoStyle::Halfblocks => Picker::halfblocks(),
+            PhotoStyle::Ascii => Picker::halfblocks(), // fallback to halfblocks for now
+        }
+    }
+}
+
+fn take_photo(camera: &mut Camera, style: PhotoStyle) -> Result<image::DynamicImage, io::Error> {
     // Warm up - discard first ~30 frames for auto-exposure
     for _ in 0..30 {
         let _ = camera.frame();
@@ -66,11 +101,12 @@ fn take_photo(camera: &mut Camera) -> Result<image::DynamicImage, io::Error> {
     let decoded = frame.decode_image::<RgbFormat>().expect("Failed to decode");
     decoded
         .save(&format!(
-            "capture-{}.png",
+            "capture-{}-{}.png",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs()
+                .as_secs(),
+            style.name()
         ))
         .expect("Failed to save");
 
@@ -81,7 +117,9 @@ fn render(
     frame: &mut Frame,
     image_state: &mut StatefulProtocol,
     status: &str,
-    photo_states: &mut [StatefulProtocol],
+    captured_photos: &[image::DynamicImage],
+    picker: &Picker,
+    current_style: PhotoStyle,
 ) {
     // Main vertical split: camera (fill) | bottom bar (fixed)
     let main_chunks = Layout::default()
@@ -106,7 +144,7 @@ fn render(
 
     let text = Paragraph::new(Text::from(vec![
         Line::from(status),
-        Line::from("[SPACE] Take Photo  [Q] Quit"),
+        Line::from(format!("[SPACE] Take Photo  [S] Style: {}  [Q] Quit", current_style.name())),
     ]))
     .block(block)
     .alignment(ratatui::layout::Alignment::Center);
@@ -126,8 +164,10 @@ fn render(
 
     // Render photos horizontally
     for (i, chunk) in photo_chunks.iter().enumerate() {
-        if i < photo_states.len() {
-            frame.render_stateful_widget(StatefulImage::new(), *chunk, &mut photo_states[i]);
+        if i < captured_photos.len() {
+            let photo = &captured_photos[i];
+            let mut photo_state = picker.new_resize_protocol(photo.clone());
+            frame.render_stateful_widget(StatefulImage::new(), *chunk, &mut photo_state);
         } else {
             // Empty placeholder
             let placeholder = Block::default()
@@ -141,11 +181,12 @@ fn render(
 fn run(
     terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     camera: &mut Camera,
-    picker: &Picker,
 ) -> io::Result<()> {
     let mut status = "";
     let mut status_set_at: Option<Instant> = None;
-    let mut photo_states: Vec<StatefulProtocol> = Vec::with_capacity(4);
+    let mut captured_photos: Vec<image::DynamicImage> = Vec::with_capacity(4);
+    let mut current_style = PhotoStyle::default();
+    let mut picker: Picker = current_style.into();
 
     loop {
         // Clear status after timeout
@@ -159,33 +200,36 @@ fn run(
         let frame = camera.frame().expect("Failed to get frame");
         let decoded = frame.decode_image::<RgbFormat>().expect("Failed to decode");
         let img = image::DynamicImage::ImageRgb8(decoded);
-        let mut img_state = picker.new_resize_protocol(img.clone());
+        let mut img_state = picker.new_resize_protocol(img);
 
-        terminal.draw(|f| render(f, &mut img_state, status, &mut photo_states))?;
+        terminal.draw(|f| render(f, &mut img_state, status, &captured_photos, &picker, current_style))?;
 
-        // Poll for input (short timeout since camera.frame() already paces us)
-        if event::poll(std::time::Duration::from_millis(16))? {
+        // Poll for input
+        if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => {
                             return Ok(());
                         }
+                        KeyCode::Char('s') => {
+                            current_style = current_style.next();
+                            picker = current_style.into();
+                        }
                         KeyCode::Char(' ') => {
                             // Show "Capturing..." before blocking
                             status = "📸 Capturing...";
                             terminal.draw(|f| {
-                                render(f, &mut img_state, status, &mut photo_states)
+                                render(f, &mut img_state, status, &captured_photos, &picker, current_style)
                             })?;
 
-                            match take_photo(camera) {
+                            match take_photo(camera, current_style) {
                                 Ok(img) => {
                                     // Keep only the last 4 photos
-                                    if photo_states.len() >= 4 {
-                                        photo_states.remove(0);
+                                    if captured_photos.len() >= 4 {
+                                        captured_photos.remove(0);
                                     }
-                                    // Create thumbnail state once and cache it
-                                    photo_states.push(picker.new_resize_protocol(img));
+                                    captured_photos.push(img);
                                     status = "✅ Saved!";
                                 }
                                 Err(_) => status = "❌ Capture failed!",
